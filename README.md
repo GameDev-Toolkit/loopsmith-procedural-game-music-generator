@@ -22,10 +22,6 @@
     <img src="https://img.shields.io/badge/generator_tests-2%2C000_loops-D8FF62?style=flat-square" alt="2,000 generator test loops">
     <a href="https://github.com/GamingToolset/loopsmith-music-generator/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-4D8EFF?style=flat-square" alt="Apache 2.0 license"></a>
   </p>
-
-  <p>
-    <a href="https://github.com/GamingToolset/loopsmith-music-generator/stargazers"><img src="https://img.shields.io/github/stars/GamingToolset/loopsmith-music-generator?style=social" alt="GitHub stars"></a>
-  </p>
 </div>
 
 > [!NOTE]
