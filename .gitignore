@@ -1,0 +1,13 @@
+# OS and editor artifacts
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# Local tooling (the project itself has no dependencies)
+node_modules/
+npm-debug.log*
+
+# Rendered previews and scratch exports
+*.wav
