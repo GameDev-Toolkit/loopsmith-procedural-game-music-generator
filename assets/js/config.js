@@ -3,14 +3,35 @@
 
   const app = window.LoopSmith = window.LoopSmith || {};
 
-  app.constants = Object.freeze({
+  /**
+   * Recursively freezes plain objects and arrays. Catalog data is shared by the
+   * generator, the audio engine, and the exporters; freezing it turns accidental
+   * mutation into a loud failure in strict mode instead of a subtle drift.
+   */
+  function deepFreeze(value) {
+    if (value && typeof value === 'object' && !Object.isFrozen(value)) {
+      Object.freeze(value);
+      Object.values(value).forEach(deepFreeze);
+    }
+    return value;
+  }
+
+  app.constants = deepFreeze({
     steps: 36,
     stepsPerBar: 4,
     harmonySteps: 8,
+    // Generated material never drops below this many sounding notes; the
+    // density slider is clamped against it in both the generator and the tests.
+    minActiveNotes: 28,
+    // Swing delays every off-beat step by this fraction of the requested amount.
+    swingDepth: 0.45,
+    // Semitone offsets for the lowest note of each voice (MIDI C3 / C2).
+    melodyBaseMidi: 48,
+    bassBaseMidi: 36,
     repositoryUrl: 'https://github.com/GamingToolset/loopsmith-music-generator'
   });
 
-  app.catalog = {
+  app.catalog = deepFreeze({
     noteNames: ['C', 'C♯', 'D', 'D♯', 'E', 'F', 'F♯', 'G', 'G♯', 'A', 'A♯', 'B'],
     scales: {
       majorPent: { label: 'major pentatonic', short: 'major pentatonic', semitones: [0, 2, 4, 7, 9, 12, 14] },
@@ -81,8 +102,10 @@
       pluck: { primary: 'triangle', harmonicRatio: 2, harmonicGain: 0.42 },
       soft: { primary: 'sine', harmonicRatio: 1.5, harmonicGain: 0.34 }
     }
-  };
+  });
 
+  // Mutable session state. Everything else the UI needs is read live from the
+  // form controls through readSettings(), so there is a single source of truth.
   app.state = {
     progression: [0, -3, -5, -7],
     melody: Array(app.constants.steps).fill(0),
@@ -97,6 +120,7 @@
   app.audioState = {
     context: null,
     graph: null,
+    starting: null,
     schedulerTimer: null,
     nextStepTime: 0,
     step: 0,
@@ -105,10 +129,11 @@
     visualTimers: new Set()
   };
 
-  app.controlIds = ['root', 'scale', 'bpm', 'energy', 'density', 'brightness', 'space', 'swing', 'pad', 'drums'];
+  app.controlIds = Object.freeze(['root', 'scale', 'bpm', 'energy', 'density', 'brightness', 'space', 'swing', 'pad', 'drums']);
   app.$ = (id) => document.getElementById(id);
 
   app.math = {
+    /** 32-bit FNV-1a. Fast, dependency-free, and stable across engines. */
     hashSeed(value) {
       let hash = 2166136261 >>> 0;
       for (let index = 0; index < value.length; index += 1) {
@@ -118,6 +143,7 @@
       return hash >>> 0;
     },
 
+    /** Mulberry32 seeded with hashSeed(); returns a float in [0, 1). */
     rngFrom(seed) {
       let state = app.math.hashSeed(seed);
       return () => {
@@ -141,20 +167,34 @@
       return app.math.stepSeconds(settings) * app.constants.steps;
     },
 
-    safeFileName(value) {
-      return value.toLowerCase().replace(/[^a-z0-9_-]+/gi, '-').replace(/^-|-$/g, '').slice(0, 48) || 'game-loop';
+    /** Number of sounding steps in a melody (rests are `null`). */
+    activeNoteCount(melody) {
+      return melody.reduce((count, note) => count + (note !== null ? 1 : 0), 0);
     },
 
+    /** Delay applied to odd steps so live playback and offline export share one swing feel. */
+    swingSeconds(step, settings) {
+      return step % 2 ? app.math.stepSeconds(settings) * (settings.swing / 100) * app.constants.swingDepth : 0;
+    },
+
+    /** Reduces arbitrary user text to a conservative, cross-platform file-name stem. */
+    safeFileName(value) {
+      return String(value).toLowerCase().replace(/[^a-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 48) || 'game-loop';
+    },
+
+    /** Short non-deterministic token used only to seed "change everything" variations. */
     entropyToken() {
-      if (window.crypto?.getRandomValues) {
+      const cryptoApi = globalThis.crypto;
+      if (cryptoApi?.getRandomValues) {
         const values = new Uint32Array(2);
-        window.crypto.getRandomValues(values);
+        cryptoApi.getRandomValues(values);
         return `${values[0].toString(36)}${values[1].toString(36)}`.slice(0, 12);
       }
       return `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 9)}`.slice(-12);
     }
   };
 
+  /** Snapshot of the current form controls and session state. Arrays are copied so callers may mutate freely. */
   app.readSettings = () => ({
     seed: app.$('seed').value.trim() || 'game-loop',
     root: Number(app.$('root').value),

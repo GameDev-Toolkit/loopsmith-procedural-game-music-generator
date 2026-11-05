@@ -2,35 +2,49 @@
   'use strict';
 
   const app = window.LoopSmith;
-  const { harmonySteps, steps, stepsPerBar } = app.constants;
+  const { harmonySteps, steps, stepsPerBar, melodyBaseMidi } = app.constants;
   const { noteNames, scales, voiceStyles } = app.catalog;
 
+  const WAV_SAMPLE_RATE = 44100;
+  const WAV_REPEATS = 2;
+  // Room for the final release and reverb tail after the last repetition.
+  const WAV_TAIL_SECONDS = 2;
+  const WAV_HEADER_BYTES = 44;
+
+  // Values the in-game implementation must mirror. They are documented in the
+  // JSON schema and quoted in the Godot/agent handoff, so they live in one place.
+  const SPEC_FORMAT = 'loopsmith-game-music-v1';
+  const GENERATOR_VERSION = 3;
+  const MELODY_ATTACK_SECONDS = 0.012;
+  const GODOT_SAMPLE_RATE = 16000;
+
+  /** Encodes an AudioBuffer as 16-bit PCM WAV (RIFF, interleaved, little-endian). */
   function encodeWav(buffer) {
     const channels = buffer.numberOfChannels;
     const sampleRate = buffer.sampleRate;
-    const dataLength = buffer.length * channels * 2;
-    const arrayBuffer = new ArrayBuffer(44 + dataLength);
-    const view = new DataView(arrayBuffer);
+    const blockAlign = channels * 2;
+    const dataLength = buffer.length * blockAlign;
+    const view = new DataView(new ArrayBuffer(WAV_HEADER_BYTES + dataLength));
     const writeText = (offset, value) => {
       for (let index = 0; index < value.length; index += 1) view.setUint8(offset + index, value.charCodeAt(index));
     };
 
     writeText(0, 'RIFF');
-    view.setUint32(4, 36 + dataLength, true);
+    view.setUint32(4, WAV_HEADER_BYTES - 8 + dataLength, true);
     writeText(8, 'WAVE');
     writeText(12, 'fmt ');
     view.setUint32(16, 16, true);
     view.setUint16(20, 1, true);
     view.setUint16(22, channels, true);
     view.setUint32(24, sampleRate, true);
-    view.setUint32(28, sampleRate * channels * 2, true);
-    view.setUint16(32, channels * 2, true);
+    view.setUint32(28, sampleRate * blockAlign, true);
+    view.setUint16(32, blockAlign, true);
     view.setUint16(34, 16, true);
     writeText(36, 'data');
     view.setUint32(40, dataLength, true);
 
     const channelData = Array.from({ length: channels }, (_, channel) => buffer.getChannelData(channel));
-    let offset = 44;
+    let offset = WAV_HEADER_BYTES;
     for (let frame = 0; frame < buffer.length; frame += 1) {
       for (let channel = 0; channel < channels; channel += 1) {
         const sample = Math.max(-1, Math.min(1, channelData[channel][frame]));
@@ -43,29 +57,32 @@
   }
 
   function downloadBlob(blob, name) {
+    const url = URL.createObjectURL(blob);
     const anchor = document.createElement('a');
-    anchor.href = URL.createObjectURL(blob);
+    anchor.href = url;
     anchor.download = name;
+    anchor.rel = 'noopener';
     document.body.appendChild(anchor);
     anchor.click();
+    // Defer revocation: some browsers start the download asynchronously.
     window.setTimeout(() => {
-      URL.revokeObjectURL(anchor.href);
+      URL.revokeObjectURL(url);
       anchor.remove();
     }, 1000);
   }
 
-  function buildSpec() {
-    const settings = app.readSettings();
+  /** Engine-neutral description of the current loop. `settings` may be injected to avoid repeated DOM reads. */
+  function buildSpec(settings = app.readSettings()) {
     const scale = scales[settings.scale];
-    const baseMidi = 48 + settings.root;
+    const baseMidi = melodyBaseMidi + settings.root;
     const stepDuration = app.math.stepSeconds(settings);
     const loopDuration = app.math.loopSeconds(settings);
-    const activeNotes = settings.melody.filter((note) => note !== null).length;
-    const voiceStyle = voiceStyles[settings.voiceStyle];
+    const activeNotes = app.math.activeNoteCount(settings.melody);
+    const voiceStyle = voiceStyles[settings.voiceStyle] || voiceStyles.bell;
 
     return {
-      format: 'loopsmith-game-music-v1',
-      generator_version: 3,
+      format: SPEC_FORMAT,
+      generator_version: GENERATOR_VERSION,
       seed: settings.seed,
       variation_profile: app.state.profileLabel,
       intended_engine: 'Godot 4 / AudioStreamGenerator',
@@ -107,7 +124,7 @@
         wave_formula: 'primary(phase) + harmonic_mix * sin(phase * harmonic_ratio)',
         harmonic_ratio: voiceStyle.harmonicRatio,
         harmonic_mix: +((0.1 + settings.brightness / 500) * voiceStyle.harmonicGain).toFixed(3),
-        attack_seconds: 0.012,
+        attack_seconds: MELODY_ATTACK_SECONDS,
         note_duration_seconds: +(stepDuration * (2.75 + settings.energy / 100 * 0.95)).toFixed(3),
         brightness_percent: settings.brightness,
         reverb_percent: settings.space,
@@ -121,7 +138,7 @@
         requested_density_percent: settings.density
       },
       integration: {
-        sample_rate_hz: 16000,
+        sample_rate_hz: GODOT_SAMPLE_RATE,
         music_bus: 'Music',
         preserve_sfx_bus: 'SFX',
         stereo_mode: 'dual_mono'
@@ -131,9 +148,8 @@
 
   const godotArray = (values) => `[${values.map((value) => value === null ? '-1' : value).join(', ')}]`;
 
-  function buildGodot() {
-    const settings = app.readSettings();
-    const spec = buildSpec();
+  function buildGodot(settings = app.readSettings()) {
+    const spec = buildSpec(settings);
     const scale = scales[settings.scale];
 
     return `# LoopSmith — Audio.gd handoff parameters
@@ -141,7 +157,7 @@
 # Motif: ${settings.motifName}; structure: ${settings.structure}
 # A PATTERN value of -1 represents a deliberate rest.
 
-const RATE := 16000.0
+const RATE := ${GODOT_SAMPLE_RATE.toFixed(1)}
 const SCALE := ${godotArray(scale.semitones)}
 const ROOTS := ${godotArray(settings.progression)}
 const PATTERN := ${godotArray(settings.melody)}
@@ -153,7 +169,7 @@ const NOTE_DUR := ${spec.sound.note_duration_seconds}
 const VOICE_STYLE := "${settings.voiceStyle}"
 const HARMONIC_RATIO := ${spec.sound.harmonic_ratio}
 const HARMONIC_MIX := ${spec.sound.harmonic_mix}
-const ATTACK := 0.012
+const ATTACK := ${MELODY_ATTACK_SECONDS}
 const BRIGHTNESS := ${settings.brightness / 100}
 const REVERB_AMOUNT := ${settings.space / 100}
 const SWING := ${settings.swing / 100}
@@ -164,9 +180,8 @@ const USE_SOFT_DRUMS := ${settings.drums}
 # Voice formula: primary(ph) + HARMONIC_MIX * sin(ph * HARMONIC_RATIO)`;
   }
 
-  function buildPrompt() {
-    const settings = app.readSettings();
-    const spec = buildSpec();
+  function buildPrompt(settings = app.readSettings()) {
+    const spec = buildSpec(settings);
 
     return `TASK: transfer this LoopSmith track into a Godot 4 game.
 
@@ -187,14 +202,14 @@ LOOP PARAMETERS
 • Melodic note duration: ${spec.sound.note_duration_seconds} seconds
 • Voice style: ${settings.voiceStyle}
 • Harmonic ratio: ${spec.sound.harmonic_ratio}; harmonic mix: ${spec.sound.harmonic_mix}
-• Attack: 0.012 seconds
+• Attack: ${MELODY_ATTACK_SECONDS} seconds
 • Space / reverb: ${settings.space}%
 • Swing: ${settings.swing}%
 • Ambient pad: ${settings.pad ? 'enabled' : 'disabled'}
 • Soft drums: ${settings.drums ? 'enabled' : 'disabled'}
 
 IMPLEMENTATION REQUIREMENTS
-1. Keep RATE = 16000 and continue filling PackedVector2Array with push_buffer.
+1. Keep RATE = ${GODOT_SAMPLE_RATE} and continue filling PackedVector2Array with push_buffer.
 2. Treat -1 in PATTERN as a rest: bass, pad, and drums continue, but do not create a melodic voice.
 3. Calculate frequency as BASE_HZ * pow(2.0, float(root + SCALE[degree]) / 12.0).
 4. Use the supplied primary waveform plus ${spec.sound.harmonic_mix} * sin(ph * ${spec.sound.harmonic_ratio}) for the melodic timbre, with a short attack and a smooth, click-free release.
@@ -217,21 +232,20 @@ Expected result: the in-game music matches this LoopSmith variation and loops wi
     }
 
     const settings = app.readSettings();
-    const sampleRate = 44100;
-    const repeats = 2;
     const loopDuration = app.math.loopSeconds(settings);
-    const duration = loopDuration * repeats + 2;
     const stepDuration = app.math.stepSeconds(settings);
+    const duration = loopDuration * WAV_REPEATS + WAV_TAIL_SECONDS;
     app.ui.setExportState(true);
 
     try {
-      const offline = new OfflineContext(2, Math.ceil(sampleRate * duration), sampleRate);
+      const offline = new OfflineContext(2, Math.ceil(WAV_SAMPLE_RATE * duration), WAV_SAMPLE_RATE);
       const graph = app.audioEngine.createGraph(offline, settings, false);
 
-      for (let repetition = 0; repetition < repeats; repetition += 1) {
+      for (let repetition = 0; repetition < WAV_REPEATS; repetition += 1) {
+        const repetitionStart = repetition * loopDuration;
         for (let step = 0; step < steps; step += 1) {
-          const swingOffset = step % 2 ? stepDuration * (settings.swing / 100) * 0.45 : 0;
-          app.audioEngine.scheduleStep(offline, graph, step, repetition * loopDuration + step * stepDuration + swingOffset, settings, repetition);
+          const time = repetitionStart + step * stepDuration + app.math.swingSeconds(step, settings);
+          app.audioEngine.scheduleStep(offline, graph, step, time, settings);
         }
       }
 
@@ -247,17 +261,17 @@ Expected result: the in-game music matches this LoopSmith variation and loops wi
   }
 
   function downloadSpec() {
-    const json = JSON.stringify(buildSpec(), null, 2);
-    const name = `loopsmith-${app.math.safeFileName(app.$('seed').value)}.json`;
-    downloadBlob(new Blob([json], { type: 'application/json' }), name);
+    const settings = app.readSettings();
+    const json = JSON.stringify(buildSpec(settings), null, 2);
+    downloadBlob(new Blob([json], { type: 'application/json' }), `loopsmith-${app.math.safeFileName(settings.seed)}.json`);
   }
 
-  app.exporter = {
+  app.exporter = Object.freeze({
     buildGodot,
     buildPrompt,
     buildSpec,
     downloadSpec,
     encodeWav,
     exportWav
-  };
+  });
 })();
