@@ -28,7 +28,9 @@ The workflow here is as straightforward as possible:
 
 ## ⬢ A Few Simple Requests
 
-- Try to stick to the code style already used in the project.
+- Try to stick to the code style already used in the project (two-space indent, strict mode, JSDoc on public functions, no runtime dependencies).
+- Keep constants, ranges, and catalog values in `assets/js/config.js`, and route every settings change through `assets/js/settings.js` so validation and undo stay in one place.
+- Run `node --test` and `for file in assets/js/*.js; do node --check "$file"; done` before opening a pull request.
 - Make your commit messages clear so it's easy to understand what changed.
 - If your Pull Request resolves a specific Issue, mention its number in the description (e.g., `Closes #42`).
 - If the logic changes, please update the relevant section in the README.

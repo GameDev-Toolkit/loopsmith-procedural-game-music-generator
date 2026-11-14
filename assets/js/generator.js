@@ -13,7 +13,7 @@
 
   const pickFrom = (values, random) => values[Math.floor(random() * values.length)];
 
-  /** In-place Fisher–Yates driven by the seeded RNG so shuffles stay reproducible. */
+  /** In-place Fisher-Yates driven by the seeded RNG so shuffles stay reproducible. */
   function shuffle(values, random) {
     for (let index = values.length - 1; index > 0; index -= 1) {
       const swapIndex = Math.floor(random() * (index + 1));
@@ -36,9 +36,13 @@
     return result;
   }
 
+  /**
+   * Derives a variation of a phrase by nudging a bounded number of interior
+   * steps. Phrase boundaries are left alone because they anchor the listener's
+   * ear, and a mostly descending last note reads as a cadence.
+   */
   function varyPhrase(source, random, scaleLength, changes = 2, transpose = 0) {
     const result = source.map((note) => clampDegree(note + transpose, scaleLength));
-    // Interior positions only: the phrase boundaries anchor the listener's ear.
     const positions = shuffle(Array.from({ length: result.length - 2 }, (_, index) => index + 1), random);
 
     // Sampling without replacement bounds the work and keeps each variation legible.
@@ -48,8 +52,6 @@
       result[position] = clampDegree(result[position] + direction * distance, scaleLength);
     }
 
-    // A downward or level phrase ending reads as a cadence without forcing every
-    // generated line to resolve in exactly the same way.
     if (random() < 0.7) {
       const last = result.length - 1;
       result[last] = clampDegree(Math.min(result[last - 1], result[last]), scaleLength);
@@ -65,8 +67,10 @@
    */
   function applyMusicalRests(notes, density, random) {
     const result = [...notes];
-    const desiredActiveNotes = Math.max(minActiveNotes, Math.min(steps, Math.round(steps * density / 100)));
+    const clampedDensity = app.math.toInteger(density, app.ranges.density);
+    const desiredActiveNotes = Math.max(minActiveNotes, Math.min(steps, Math.round(steps * clampedDensity / 100)));
     const targetRestCount = steps - desiredActiveNotes;
+    if (targetRestCount <= 0) return result;
 
     const candidates = [3, 1, 2].flatMap((position) => {
       const group = [];
@@ -97,12 +101,12 @@
   function validateMelody(notes, scaleLength) {
     if (!Array.isArray(notes) || notes.length !== steps) return false;
 
-    const degreesValid = notes.every((note, index) => {
-      const isValidDegree = note === null || (Number.isInteger(note) && note >= 0 && note < scaleLength);
+    for (let index = 0; index < steps; index += 1) {
+      const note = notes[index];
+      const validDegree = note === null || (Number.isInteger(note) && note >= 0 && note < scaleLength);
       const protectedStep = index % stepsPerBar === 0 || index >= codaStart;
-      return isValidDegree && (!protectedStep || note !== null);
-    });
-    if (!degreesValid) return false;
+      if (!validDegree || (protectedStep && note === null)) return false;
+    }
 
     for (let bar = 0; bar < barCount; bar += 1) {
       let rests = 0;
@@ -117,13 +121,18 @@
 
   /**
    * Deterministic for (seed, scale, density). Any change to the decision order
-   * below alters existing seeds, which is why the RNG namespace carries a version.
+   * below alters existing seeds, which is why the RNG namespace carries a
+   * version and `constants.generatorVersion` is exported with every handoff.
+   *
+   * @param {{seed: string, scale: string, density: number}} settings
+   * @returns {{notes: Array<number|null>, motifName: string, structure: string}}
    */
   function composeMelody(settings) {
     const scale = scales[settings.scale];
     if (!scale) throw new Error(`Unknown scale "${settings.scale}".`);
 
     const random = app.math.rngFrom(`${settings.seed}-motif-engine-v3`);
+    const density = app.math.toInteger(settings.density, app.ranges.density);
     const scaleLength = scale.semitones.length;
     const motif = pickFrom(motifLibrary, random);
     let phraseA = motif.notes.map((note) => clampDegree(note, scaleLength));
@@ -163,7 +172,7 @@
     const cadence = [cadenceSource[4], cadenceSource[5], random() < 0.55 ? 1 : 2, 0]
       .map((note) => clampDegree(note, scaleLength));
     const completePhrase = structure.phrases.flat().concat(cadence).slice(0, steps);
-    const notes = applyMusicalRests(completePhrase, settings.density, random);
+    const notes = applyMusicalRests(completePhrase, density, random);
 
     if (!validateMelody(notes, scaleLength)) {
       throw new Error('Generated melody failed its structural invariants.');
@@ -185,7 +194,12 @@
   /**
    * Builds a complete new musical identity that is audibly different from the
    * current one: a different profile, progression, root, and seed. This path is
-   * intentionally non-deterministic; reproducibility comes from the resulting seed.
+   * intentionally non-deterministic; reproducibility comes from the resulting
+   * seed, which the caller stores with the composition.
+   *
+   * @param {object} previousSettings
+   * @param {string} currentProfileKey
+   * @param {number[]} currentProgression
    */
   function createFullVariation(previousSettings, currentProfileKey, currentProgression) {
     const profileKeys = Object.keys(variationProfiles).filter((key) => key !== currentProfileKey);
@@ -196,22 +210,24 @@
     const random = app.math.rngFrom(seed);
     const pick = (values) => pickFrom(values, random);
 
-    const currentProgressionKey = currentProgression.join(',');
+    const currentProgressionKey = (currentProgression || []).join(',');
     const progressionChoices = progressionBank.filter((progression) => progression.join(',') !== currentProgressionKey);
     const progression = pick(progressionChoices.length ? progressionChoices : progressionBank);
+
+    const previousRoot = app.math.toInteger(previousSettings.root, app.ranges.root);
 
     return {
       profileKey,
       profileLabel: profile.label,
       seed,
-      root: (previousSettings.root + 1 + Math.floor(random() * 11)) % 12,
+      root: (previousRoot + 1 + Math.floor(random() * 11)) % 12,
       scale: pick(profile.scales),
-      bpm: variedInteger(random, profile.bpm, previousSettings.bpm, 7),
-      energy: variedInteger(random, profile.energy, previousSettings.energy, 10),
-      density: variedInteger(random, profile.density, previousSettings.density, 6),
-      brightness: variedInteger(random, profile.brightness, previousSettings.brightness, 12),
-      space: variedInteger(random, profile.space, previousSettings.space, 12),
-      swing: variedInteger(random, profile.swing, previousSettings.swing, 3),
+      bpm: variedInteger(random, profile.bpm, app.math.toInteger(previousSettings.bpm, app.ranges.bpm), 7),
+      energy: variedInteger(random, profile.energy, app.math.toInteger(previousSettings.energy, app.ranges.energy), 10),
+      density: variedInteger(random, profile.density, app.math.toInteger(previousSettings.density, app.ranges.density), 6),
+      brightness: variedInteger(random, profile.brightness, app.math.toInteger(previousSettings.brightness, app.ranges.brightness), 12),
+      space: variedInteger(random, profile.space, app.math.toInteger(previousSettings.space, app.ranges.space), 12),
+      swing: variedInteger(random, profile.swing, app.math.toInteger(previousSettings.swing, app.ranges.swing), 3),
       pad: pick(profile.pad),
       drums: pick(profile.drums),
       voiceStyle: pick(profile.voices),

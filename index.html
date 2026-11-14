@@ -25,7 +25,7 @@
           <i class="status-dot" aria-hidden="true"></i>
           <span id="audioStatus">Ready</span>
         </div>
-        <a class="github-link" href="https://github.com/GamingToolset/loopsmith-music-generator" target="_blank" rel="noopener noreferrer" title="Open the GitHub repository">
+        <a class="github-link" href="https://github.com/GamingToolset/loopsmith-music-generator" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer" title="Open the GitHub repository">
           <span class="github-mark" aria-hidden="true">&lt;/&gt;</span>
           <span>GitHub repository</span>
         </a>
@@ -41,12 +41,13 @@
         </div>
 
         <div class="transport" aria-label="Playback controls">
-          <button class="play-btn" id="play" type="button">
+          <button class="play-btn" id="play" type="button" aria-keyshortcuts="Space">
             <span id="playIcon" aria-hidden="true">▶</span>
             <span id="playText">Play</span>
           </button>
           <button class="soft-btn" id="generate" type="button">New loop · change everything</button>
           <button class="soft-btn" id="exportWav" type="button">Export WAV</button>
+          <button class="soft-btn" id="copyLink" type="button" title="Copy a link that restores this exact loop">Copy link</button>
           <span class="time" id="transportTime">Bar 1/9 · Step 1/36</span>
 
           <div class="session-meta" aria-label="Current loop summary">
@@ -61,7 +62,11 @@
         <div class="sequence-wrap">
           <div class="sequence-title">
             <b id="melodyTitle">Melody</b>
-            <span id="melodyDetails">Game Arc · 36/36 notes</span>
+            <div class="sequence-actions">
+              <span id="melodyDetails">Game Arc · 36/36 notes</span>
+              <button class="soft-btn icon-action" id="undoStep" type="button" title="Undo (Ctrl+Z)" aria-label="Undo last change" disabled>↶</button>
+              <button class="soft-btn icon-action" id="redoStep" type="button" title="Redo (Ctrl+Shift+Z)" aria-label="Redo last change" disabled>↷</button>
+            </div>
           </div>
           <div class="step-grid" id="stepGrid" role="group" aria-label="Editable melody sequencer"></div>
           <div class="beat-numbers" id="beatNumbers" aria-hidden="true"></div>
@@ -91,7 +96,7 @@
             <div class="field wide">
               <div class="field-row"><label for="seed">Seed</label></div>
               <div class="seed-wrap">
-                <input id="seed" type="text" value="swipe-dots-01" autocomplete="off">
+                <input id="seed" type="text" value="swipe-dots-01" autocomplete="off" spellcheck="false">
                 <button class="icon-btn" id="newSeed" type="button" title="Generate a completely different loop" aria-label="Generate a completely different loop">↻</button>
               </div>
             </div>
@@ -121,10 +126,12 @@
             <div class="field"><div class="field-row"><label for="brightness">Timbre brightness</label><output id="brightnessOut">35%</output></div><input id="brightness" type="range" min="0" max="100" value="35"></div>
             <div class="field"><div class="field-row"><label for="space">Space</label><output id="spaceOut">14%</output></div><input id="space" type="range" min="0" max="100" value="14"></div>
             <div class="field"><div class="field-row"><label for="swing">Swing</label><output id="swingOut">0%</output></div><input id="swing" type="range" min="0" max="35" value="0"></div>
+            <div class="field"><div class="field-row"><label for="volume">Volume</label><output id="volumeOut">100%</output></div><input id="volume" type="range" min="0" max="100" value="100"></div>
 
             <div class="control-toggles">
               <div class="toggle-row"><span id="padLabel">Ambient pad</span><label class="switch"><input id="pad" type="checkbox" aria-labelledby="padLabel"><span aria-hidden="true"></span></label></div>
               <div class="toggle-row"><span id="drumsLabel">Soft drums</span><label class="switch"><input id="drums" type="checkbox" aria-labelledby="drumsLabel"><span aria-hidden="true"></span></label></div>
+              <p class="shortcut-hint">Space plays · M mutes · Ctrl+Z undoes · arrows move through the grid</p>
             </div>
           </div>
 
@@ -163,8 +170,10 @@
 
   <div class="toast" id="toast" role="status" aria-live="polite">Copied</div>
 
-  <!-- Ordered classic scripts preserve direct file:// usage without a build step. -->
+  <!-- Ordered classic scripts keep direct file:// usage without a build step. -->
   <script defer src="assets/js/config.js"></script>
+  <script defer src="assets/js/settings.js"></script>
+  <script defer src="assets/js/session.js"></script>
   <script defer src="assets/js/generator.js"></script>
   <script defer src="assets/js/audio-engine.js"></script>
   <script defer src="assets/js/export.js"></script>

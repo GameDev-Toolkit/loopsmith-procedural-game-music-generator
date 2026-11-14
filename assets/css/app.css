@@ -256,6 +256,7 @@ canvas {
 
 .sequence-title {
   display: flex;
+  align-items: center;
   justify-content: space-between;
   margin-bottom: 10px;
   gap: 18px;
@@ -265,12 +266,39 @@ canvas {
   font-size: 12px;
   letter-spacing: 0.06em;
   text-transform: uppercase;
+  white-space: nowrap;
 }
 
-.sequence-title span {
+.sequence-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  min-width: 0;
+  gap: 10px;
+}
+
+.sequence-actions span {
+  overflow: hidden;
   color: var(--muted);
   font-size: 10px;
   text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.icon-action {
+  flex: none;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  font-size: 13px;
+  line-height: 1;
+}
+
+.icon-action:disabled {
+  cursor: default;
+  opacity: 0.4;
+  transform: none;
 }
 
 .step-grid,
@@ -458,6 +486,14 @@ input[type="range"] {
 .switch:has(input:focus-visible) span {
   outline: 2px solid var(--accent);
   outline-offset: 3px;
+}
+
+.shortcut-hint {
+  flex: 1 1 100%;
+  margin: 2px 0 0;
+  color: #777781;
+  font-size: 10px;
+  line-height: 1.5;
 }
 
 .sfx-strip {

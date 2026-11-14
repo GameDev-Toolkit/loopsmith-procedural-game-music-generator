@@ -70,12 +70,16 @@
   }
 
   .sequence-title {
-    display: block;
+    flex-wrap: wrap;
   }
 
-  .sequence-title span {
-    display: block;
-    margin-top: 5px;
+  .sequence-actions {
+    justify-content: space-between;
+    width: 100%;
+  }
+
+  .sequence-actions span {
+    flex: 1 1 auto;
     text-align: left;
   }
 }
