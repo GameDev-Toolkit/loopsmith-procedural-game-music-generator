@@ -36,6 +36,7 @@
 - [Using the studio](#using-the-studio)
 - [How generation works](#how-generation-works)
 - [Reproducibility](#reproducibility)
+- [Sessions and sharing](#sessions-and-sharing)
 - [Export formats](#export-formats)
 - [Testing](#testing)
 - [Browser support](#browser-support)
@@ -71,6 +72,8 @@ The application remains deliberately portable:
 | ◆ | **Constrained density** | 28–36 active notes, protected downbeats and coda, no adjacent generated rests, and no more than one rest per visual bar. |
 | ◉ | **Stable real-time audio** | Look-ahead Web Audio scheduling for melody, bass, pad, and percussion, plus transparent peak protection. |
 | 〽 | **Live signal view** | A responsive waveform that follows the analyser without rebuilding hundreds of sequencer controls on every step. |
+| ↺ | **Reversible editing** | Undo and redo cover generated material, manual note edits, presets, and arrangement changes. |
+| 🔗 | **Shareable and resumable** | The whole arrangement fits in a permalink fragment, and the studio restores your last session after a reload. |
 | ⇩ | **Portable exports** | WAV, JSON, Godot constants, and a complete implementation prompt for a coding agent. |
 | ⌁ | **Offline and private** | Seeds, settings, melodies, handoff data, and rendered audio remain on the device. |
 
@@ -102,21 +105,32 @@ LoopSmith/
 │   │   ├── app.css               # Studio layout and components
 │   │   └── responsive.css        # Responsive layout rules
 │   └── js/
-│       ├── config.js             # Catalogs, presets, state, shared math
+│       ├── config.js             # Constants, ranges, tuning, catalogs, shared math
+│       ├── settings.js           # Validated settings model and change notifications
+│       ├── session.js            # Local persistence and shareable permalinks
 │       ├── generator.js          # Deterministic composition engine
 │       ├── audio-engine.js       # Web Audio voices and scheduler
 │       ├── export.js             # WAV, JSON, Godot, and agent handoff
 │       ├── ui.js                 # Sequencer, waveform, and output views
-│       └── main.js               # Initialization and event orchestration
+│       └── main.js               # Initialization, history, and event orchestration
 ├── website/
 │   ├── index.html                # Self-contained one-page presentation
 │   └── og.png                    # Social preview card
 ├── tests/
-│   └── generator.test.js         # Determinism and invariant checks
+│   ├── generator.test.js         # Determinism and invariant checks
+│   ├── settings.test.js          # Validation, clamping, and change notifications
+│   ├── session.test.js           # Permalink codec and persistence
+│   ├── export.test.js            # WAV encoding and handoff contracts
+│   └── support/dom-shim.js       # Minimal form shim for the settings tests
 └── README.md
 ```
 
 The scripts use a small `window.LoopSmith` namespace and load in dependency order. This keeps responsibilities separate while preserving direct browser use and avoiding a bundler.
+
+Two rules keep the modules honest:
+
+- `config.js` owns every constant, range, and catalog value. Nothing else hard-codes a tempo limit or a filter coefficient.
+- `settings.js` owns the musical model. Form values, restored sessions, and shared links all pass through the same validation gate, so a consumer can assume a legal, complete snapshot.
 
 ## Using the studio
 
@@ -125,14 +139,27 @@ The scripts use a small `window.LoopSmith` namespace and load in dependency orde
 - **Play / Stop** starts or stops real-time synthesis.
 - **New loop · change everything** selects a different character and regenerates the complete musical identity.
 - **Export WAV** renders two repetitions plus a short effects tail at 44.1 kHz.
-- The space bar toggles playback when focus is not inside an interactive control.
+- **Copy link** puts a permalink to the exact arrangement on the clipboard.
 - The session summary reports key, loop length, and character.
+- Stopping fades the output over roughly 35 ms, so a loop never ends on a click.
+
+### Keyboard
+
+| Shortcut | Action |
+| --- | --- |
+| Space | Toggle playback when focus is not on a control |
+| M | Mute or unmute monitoring |
+| Ctrl/Cmd + Z | Undo the last change |
+| Ctrl/Cmd + Shift + Z, Ctrl + Y | Redo |
+| Arrow keys | Move through the sequencer |
+| Enter / Space in the grid | Place a note or turn it into a rest |
+| Home / End | Jump to the first or last step |
 
 ### Melody editor
 
-The sequencer has 36 columns and seven scale-degree rows. Click an empty cell to place the note for that step at the selected degree. Click the active cell again to create a rest.
+The sequencer has 36 columns and seven scale-degree rows. Click an empty cell to place the note for that step at the selected degree. Click the active cell again to create a rest. Every edit is undoable.
 
-The generated-density guarantees apply only to generated material. Manual editing is intentionally unrestricted.
+The grid is a single tab stop: arrow keys move between steps and degrees, so the whole melody can be edited without a mouse. The generated-density guarantees apply only to generated material. Manual editing is intentionally unrestricted.
 
 ### Sound controls
 
@@ -150,6 +177,7 @@ The generated-density guarantees apply only to generated material. Manual editin
 | Swing | Delays alternating sequence steps |
 | Ambient pad | Adds quiet sustained chord tones |
 | Soft drums | Adds a restrained kick-and-hat layer |
+| Volume | Sets the monitoring level only; exports always render at unity |
 
 ### Game SFX
 
@@ -211,7 +239,17 @@ The melody engine is deterministic for the combination of:
 - density;
 - generator version.
 
-Root, tempo, timbre, progression, and layer choices are independent arrangement parameters. To reproduce the complete loop exactly, keep the exported JSON rather than the seed alone. The JSON includes `generator_version: 3` and all current musical and integration values.
+Root, tempo, timbre, progression, and layer choices are independent arrangement parameters. To reproduce the complete loop exactly, keep the exported JSON or the permalink rather than the seed alone. The JSON includes `generator_version: 3` and all current musical and integration values.
+
+## Sessions and sharing
+
+The studio never asks where your work came from, but it does not want you to lose it either.
+
+- **Autosave** stores the current arrangement in `localStorage` (key `loopsmith.session.v1`) about 400 ms after the last edit. A reload restores it and says so in the status toast.
+- **Permalinks** carry the same snapshot in the URL fragment (`#s=…`). The fragment never leaves the browser, so a shared link stays as private as the studio itself, and any loop can be bookmarked or sent to a collaborator.
+- **Precedence** is explicit: a link overrides a stored session, which overrides the default preset. Selecting a starting point in the preset menu replaces the current state, and the next autosave records that choice.
+
+Payloads are decoded defensively. The fragment is length-limited, versioned, parsed inside a `try` block, filtered against an allow-list of musical fields, and then normalised by the same clamping rules that protect the form. A malformed or hand-edited link loads the defaults instead of corrupting the session.
 
 ## Export formats
 
@@ -225,7 +263,7 @@ WAV export uses `OfflineAudioContext` at 44.1 kHz and includes:
 - filtering, convolution space, and output limiting;
 - a short tail for releases and reverb.
 
-The WAV is intended for auditioning, review, or reference. The procedural handoff remains the recommended in-game workflow.
+The WAV is intended for auditioning, review, or reference. It is rendered with the same voice builders and signal chain as live playback, but without the monitoring stage, so the volume slider and mute never change the file. The procedural handoff remains the recommended in-game workflow.
 
 ### JSON
 
@@ -263,13 +301,21 @@ Recommended workflow:
 
 ## Testing
 
-The generator test suite requires Node.js only; it does not install packages:
+The test suite requires Node.js 20 or newer and installs nothing:
 
 ```bash
-node tests/generator.test.js
+node --test
 ```
 
-It currently validates 2,000 compositions across every scale and representative density values. The checks cover determinism, legal scale degrees, exact constrained density, preserved downbeats, coda integrity, and per-bar rest limits.
+The generator suite validates 2,000 compositions across every scale and representative density values. The checks cover determinism, legal scale degrees, exact constrained density, preserved downbeats, coda integrity, and per-bar rest limits.
+
+The remaining suites cover the parts of the application that are easiest to break silently:
+
+| Suite | What it protects |
+| --- | --- |
+| `settings.test.js` | Range clamping, non-numeric input, melody and progression normalisation, unknown-key rejection, snapshot caching, change notifications |
+| `session.test.js` | Permalink round trips, malformed and stale payloads, storage failures, debounced writes |
+| `export.test.js` | RIFF header layout, sample clamping, spec fields, and handoff text that a crafted seed cannot break out of |
 
 For changes to audio or layout, also verify manually in a current Chromium browser and Firefox:
 
@@ -296,6 +342,13 @@ The browser must support the Web Audio API. WAV rendering additionally requires 
 
 The studio does not upload seeds, melodies, settings, handoff text, or audio. It contains no analytics, external fonts, remote scripts, or API calls. The project page also uses local CSS, JavaScript, canvas rendering, and a local social-preview image.
 
+Two browser storage mechanisms exist, and both stay on the device:
+
+- `localStorage['loopsmith.session.v1']` holds the last arrangement for autosave.
+- The URL fragment holds the same arrangement when you copy a permalink.
+
+Neither is transmitted anywhere. Clearing site data removes the snapshot, and the next edit replaces it.
+
 ## Troubleshooting
 
 ### No sound after pressing Play
@@ -308,6 +361,14 @@ The studio does not upload seeds, melodies, settings, handoff text, or audio. It
 ### The waveform is flat
 
 The waveform is intentionally flat while stopped. Start playback and confirm that the header status changes to **Playing**.
+
+### The studio restored a loop instead of the original preset
+
+Autosave is intentional. Choose **Quiet puzzle** under **Starting point** to return to the default theme, or clear site data to drop the stored session.
+
+### A shared link opens the default loop
+
+The fragment is validated before use. A link truncated by a chat client, a mail gateway, or a link shortener fails validation and falls back to the defaults. Copy the permalink again with **Copy link**, which places the complete payload on the clipboard.
 
 ### Clipboard copy is blocked
 
@@ -328,6 +389,7 @@ The seed reproduces composition decisions under the same scale and density. Use 
 - Preserve direct manual control after generation.
 - Make the browser tool useful without a build system or account.
 - Export implementation data, not only rendered audio.
+- Validate untrusted input once, at the edge, instead of guarding every consumer.
 - Keep the runtime small enough to understand and modify.
 
 ## Contributing

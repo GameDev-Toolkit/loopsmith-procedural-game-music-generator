@@ -4,14 +4,19 @@
   const app = window.LoopSmith = window.LoopSmith || {};
 
   /**
-   * Recursively freezes plain objects and arrays. Catalog data is shared by the
-   * generator, the audio engine, and the exporters; freezing it turns accidental
-   * mutation into a loud failure in strict mode instead of a subtle drift.
+   * Recursively freezes arrays and plain objects. Catalog data and tuning values
+   * are shared by the generator, the audio engine, and the exporters; freezing
+   * turns an accidental mutation into a loud failure in strict mode instead of a
+   * silent behaviour change.
+   *
+   * @template T
+   * @param {T} value
+   * @returns {T}
    */
   function deepFreeze(value) {
     if (value && typeof value === 'object' && !Object.isFrozen(value)) {
       Object.freeze(value);
-      Object.values(value).forEach(deepFreeze);
+      for (const entry of Object.values(value)) deepFreeze(entry);
     }
     return value;
   }
@@ -20,15 +25,73 @@
     steps: 36,
     stepsPerBar: 4,
     harmonySteps: 8,
-    // Generated material never drops below this many sounding notes; the
-    // density slider is clamped against it in both the generator and the tests.
+    /** Generated material never contains fewer sounding notes than this. */
     minActiveNotes: 28,
-    // Swing delays every off-beat step by this fraction of the requested amount.
+    /** Fraction of a step that an off-beat note is delayed by when swing is requested. */
     swingDepth: 0.45,
-    // Semitone offsets for the lowest note of each voice (MIDI C3 / C2).
     melodyBaseMidi: 48,
     bassBaseMidi: 36,
-    repositoryUrl: 'https://github.com/GamingToolset/loopsmith-music-generator'
+    /** Bumped whenever a change to the generator alters the output of existing seeds. */
+    generatorVersion: 3
+  });
+
+  /**
+   * Valid ranges for every numeric control. Values are clamped through these
+   * definitions whenever settings are read from the form, written by code,
+   * restored from storage, or decoded from a shared link. This is the only place
+   * that decides what a legal tempo, density, or volume is.
+   */
+  app.ranges = deepFreeze({
+    root: { min: 0, max: 11, fallback: 9 },
+    bpm: { min: 55, max: 150, fallback: 71 },
+    energy: { min: 0, max: 100, fallback: 32 },
+    density: { min: 68, max: 100, fallback: 88 },
+    brightness: { min: 0, max: 100, fallback: 35 },
+    space: { min: 0, max: 100, fallback: 14 },
+    swing: { min: 0, max: 35, fallback: 0 },
+    volume: { min: 0, max: 100, fallback: 100 }
+  });
+
+  /** Form controls that hold a numeric value, in the order the UI presents them. */
+  app.numericIds = Object.freeze(['root', 'bpm', 'energy', 'density', 'brightness', 'space', 'swing', 'volume']);
+
+  /** Numeric controls that are presented with a live read-out. */
+  app.outputIds = Object.freeze(['bpm', 'energy', 'density', 'brightness', 'space', 'swing', 'volume']);
+
+  /**
+   * Engine tuning. Keeping these in one frozen table avoids magic numbers spread
+   * across the scheduler, the voice builders, and the offline renderer, and makes
+   * the difference between live and offline rendering explicit.
+   */
+  app.tuning = deepFreeze({
+    scheduler: {
+      intervalMs: 25,
+      lookAheadSeconds: 0.12,
+      // Background tabs throttle timers to roughly one call per second, so the
+      // scheduling window is widened there to avoid audible gaps.
+      hiddenLookAheadSeconds: 1.5,
+      startLatencySeconds: 0.06,
+      // Resynchronise instead of emitting a burst of overdue steps after a stall.
+      maxCatchUpSeconds: 0.5
+    },
+    audio: {
+      masterGain: 0.62,
+      minGain: 0.0001,
+      filterQ: 0.35,
+      dryGain: 0.94,
+      reverbSendScale: 0.42,
+      impulseSeed: 'loopsmith-room-v1',
+      impulseSeconds: 1.7,
+      impulseDecay: 2.7,
+      hatSeconds: 0.045,
+      stopFadeSeconds: 0.035
+    },
+    export: {
+      sampleRate: 44100,
+      repeats: 2,
+      tailSeconds: 2,
+      headerBytes: 44
+    }
   });
 
   app.catalog = deepFreeze({
@@ -48,8 +111,9 @@
     },
     presetLabels: { original: 'Original', calm: 'Calm', arcade: 'Neon', mystery: 'Mystery', focus: 'Focus' },
 
-    // Profiles describe coherent musical regions, not fixed songs. Weighted entries
-    // intentionally bias the generator toward the project's bright puzzle-game identity.
+    // Profiles describe coherent musical regions, not fixed songs. Repeated
+    // entries intentionally bias the generator toward the project's bright
+    // puzzle-game identity.
     variationProfiles: {
       classic: { label: 'Classic Dots', bpm: [64, 82], energy: [26, 48], density: [88, 100], brightness: [24, 48], space: [6, 24], swing: [0, 4], scales: ['majorPent', 'majorPent', 'majorPent', 'major'], pad: [false], drums: [false], voices: ['bell'] },
       morning: { label: 'Morning Puzzle', bpm: [70, 90], energy: [30, 54], density: [82, 96], brightness: [38, 62], space: [12, 34], swing: [0, 7], scales: ['majorPent', 'majorPent', 'major'], pad: [false, true], drums: [false], voices: ['bell', 'warm'] },
@@ -104,8 +168,10 @@
     }
   });
 
-  // Mutable session state. Everything else the UI needs is read live from the
-  // form controls through readSettings(), so there is a single source of truth.
+  /**
+   * Session state that has no form control of its own. Everything else is read
+   * from the form by the settings module, which keeps a single source of truth.
+   */
   app.state = {
     progression: [0, -3, -5, -7],
     melody: Array(app.constants.steps).fill(0),
@@ -114,9 +180,10 @@
     profileLabel: 'Original',
     voiceStyle: 'bell',
     motifName: 'Game Arc',
-    structure: 'A A′ B A″ + coda'
+    structure: 'Original repeating theme'
   };
 
+  /** Live audio objects. Only the audio engine writes here; the UI reads `playing` and `graph`. */
   app.audioState = {
     context: null,
     graph: null,
@@ -125,19 +192,75 @@
     nextStepTime: 0,
     step: 0,
     playing: false,
-    sources: new Set(),
-    visualTimers: new Set()
+    sources: new Set()
   };
 
-  app.controlIds = Object.freeze(['root', 'scale', 'bpm', 'energy', 'density', 'brightness', 'space', 'swing', 'pad', 'drums']);
-  app.$ = (id) => document.getElementById(id);
+  /**
+   * Element lookup cache. Elements are resolved once and reused, which keeps
+   * hot paths (the scheduler, the playhead) free of repeated tree walks.
+   */
+  const elementCache = new Map();
 
-  app.math = {
+  app.dom = Object.freeze({
+    /** @param {string} id */
+    get(id) {
+      let element = elementCache.get(id);
+      if (element === undefined) {
+        element = typeof document === 'undefined' ? null : document.getElementById(id);
+        if (element) elementCache.set(id, element);
+      }
+      return element;
+    },
+    /** Resolves an element that the application cannot work without. */
+    require(id) {
+      const element = app.dom.get(id);
+      if (!element) throw new Error(`Missing required element #${id}.`);
+      return element;
+    },
+    /** Clears the cache; used by tests that mount a fresh document. */
+    reset() {
+      elementCache.clear();
+    }
+  });
+
+  /** Shorthand used across the UI layer. */
+  app.$ = app.dom.get;
+
+  app.math = Object.freeze({
+    /**
+     * Clamps a finite number into an inclusive range.
+     * @param {number} value
+     * @param {number} min
+     * @param {number} max
+     */
+    clamp(value, min, max) {
+      return Math.min(max, Math.max(min, value));
+    },
+
+    /**
+     * Coerces arbitrary input into an integer inside a configured range. Only
+     * numbers and numeric strings are accepted; everything else (null, empty
+     * strings, booleans, objects) falls back to the range default instead of
+     * producing NaN or a silent zero.
+     *
+     * @param {unknown} value
+     * @param {{min: number, max: number, fallback: number}} range
+     */
+    toInteger(value, range) {
+      let numeric = NaN;
+      if (typeof value === 'number') numeric = value;
+      else if (typeof value === 'string' && value.trim() !== '') numeric = Number(value);
+
+      if (!Number.isFinite(numeric)) return range.fallback;
+      return app.math.clamp(Math.round(numeric), range.min, range.max);
+    },
+
     /** 32-bit FNV-1a. Fast, dependency-free, and stable across engines. */
     hashSeed(value) {
+      const text = String(value);
       let hash = 2166136261 >>> 0;
-      for (let index = 0; index < value.length; index += 1) {
-        hash ^= value.charCodeAt(index);
+      for (let index = 0; index < text.length; index += 1) {
+        hash ^= text.charCodeAt(index);
         hash = Math.imul(hash, 16777619);
       }
       return hash >>> 0;
@@ -155,62 +278,61 @@
       };
     },
 
+    /** Equal-tempered frequency of a MIDI note number. */
     midiHz(midi) {
       return 440 * Math.pow(2, (midi - 69) / 12);
     },
 
-    stepSeconds(settings = app.readSettings()) {
-      return 30 / settings.bpm;
+    /** Pitch-class name for a MIDI note number. */
+    midiToNoteName(midi) {
+      const names = app.catalog.noteNames;
+      return names[((Math.round(midi) % 12) + 12) % 12];
     },
 
-    loopSeconds(settings = app.readSettings()) {
+    /** Duration of one sequencer step in seconds. */
+    stepSeconds(settings) {
+      const bpm = app.math.toInteger(settings && settings.bpm, app.ranges.bpm);
+      return 30 / bpm;
+    },
+
+    /** Duration of one full pass through the sequence in seconds. */
+    loopSeconds(settings) {
       return app.math.stepSeconds(settings) * app.constants.steps;
     },
 
     /** Number of sounding steps in a melody (rests are `null`). */
     activeNoteCount(melody) {
-      return melody.reduce((count, note) => count + (note !== null ? 1 : 0), 0);
+      let count = 0;
+      for (const note of melody) if (note !== null) count += 1;
+      return count;
     },
 
     /** Delay applied to odd steps so live playback and offline export share one swing feel. */
     swingSeconds(step, settings) {
-      return step % 2 ? app.math.stepSeconds(settings) * (settings.swing / 100) * app.constants.swingDepth : 0;
+      if (step % 2 === 0) return 0;
+      const swing = app.math.toInteger(settings && settings.swing, app.ranges.swing);
+      return app.math.stepSeconds(settings) * (swing / 100) * app.constants.swingDepth;
     },
 
-    /** Reduces arbitrary user text to a conservative, cross-platform file-name stem. */
+    /** Reduces arbitrary text to a conservative, cross-platform file-name stem. */
     safeFileName(value) {
-      return String(value).toLowerCase().replace(/[^a-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 48) || 'game-loop';
+      const stem = String(value)
+        .toLowerCase()
+        .replace(/[^a-z0-9_-]+/g, '-')
+        .replace(/^-+|-+$/g, '')
+        .slice(0, 48);
+      return stem || 'game-loop';
     },
 
-    /** Short non-deterministic token used only to seed "change everything" variations. */
+    /** Short non-deterministic token, used only to seed "change everything" variations. */
     entropyToken() {
       const cryptoApi = globalThis.crypto;
-      if (cryptoApi?.getRandomValues) {
+      if (cryptoApi && typeof cryptoApi.getRandomValues === 'function') {
         const values = new Uint32Array(2);
         cryptoApi.getRandomValues(values);
         return `${values[0].toString(36)}${values[1].toString(36)}`.slice(0, 12);
       }
       return `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 9)}`.slice(-12);
     }
-  };
-
-  /** Snapshot of the current form controls and session state. Arrays are copied so callers may mutate freely. */
-  app.readSettings = () => ({
-    seed: app.$('seed').value.trim() || 'game-loop',
-    root: Number(app.$('root').value),
-    scale: app.$('scale').value,
-    bpm: Number(app.$('bpm').value),
-    energy: Number(app.$('energy').value),
-    density: Number(app.$('density').value),
-    brightness: Number(app.$('brightness').value),
-    space: Number(app.$('space').value),
-    swing: Number(app.$('swing').value),
-    pad: app.$('pad').checked,
-    drums: app.$('drums').checked,
-    progression: [...app.state.progression],
-    melody: [...app.state.melody],
-    voiceStyle: app.state.voiceStyle,
-    motifName: app.state.motifName,
-    structure: app.state.structure
   });
 })();

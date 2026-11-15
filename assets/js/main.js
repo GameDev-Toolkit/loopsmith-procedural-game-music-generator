@@ -5,168 +5,331 @@
   const { steps } = app.constants;
   const { presets, presetLabels } = app.catalog;
 
-  const DEFAULT_VOICE_STYLE = 'bell';
-  const ORIGINAL_MOTIF_NAME = 'Game Arc';
+  const HISTORY_LIMIT = 60;
+  // Consecutive changes to a single control within this window collapse into one
+  // undo entry, so dragging a slider produces one step rather than sixty.
+  const HISTORY_COALESCE_MS = 450;
+  const LOCATION_SYNC_DELAY_MS = 600;
+  const ORIGINAL_MOTIF = 'Game Arc';
   const ORIGINAL_STRUCTURE = 'Original repeating theme';
 
-  /** Pushes a settings-like object into the form controls and session state. Missing keys are left untouched. */
-  function writeSettings(values) {
-    app.$('seed').value = values.seed;
-    app.$('root').value = values.root;
-    app.$('scale').value = values.scale;
-    app.$('bpm').value = values.bpm;
-    app.$('energy').value = values.energy;
-    app.$('density').value = values.density;
-    app.$('brightness').value = values.brightness;
-    app.$('space').value = values.space;
-    app.$('swing').value = values.swing;
-    app.$('pad').checked = values.pad;
-    app.$('drums').checked = values.drums;
-    app.state.progression = [...values.progression];
-    app.state.voiceStyle = values.voiceStyle || DEFAULT_VOICE_STYLE;
+  const history = {
+    past: [],
+    future: [],
+    lastPushAt: 0,
+    lastSignature: '',
+    recording: false
+  };
+
+  let muted = false;
+  let locationTimer = 0;
+  let startupComplete = false;
+
+  const now = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
+
+  /* ------------------------------------------------------------------ *
+   * Undo history
+   * ------------------------------------------------------------------ */
+
+  function updateHistoryState() {
+    app.ui.setHistoryState(history.past.length > 0, history.future.length > 0);
   }
 
-  /** Re-renders derived UI and pushes graph-affecting controls to the live audio chain. */
-  function refresh() {
-    app.ui.updateOutputs();
-    app.audioEngine.updateGraph();
-  }
+  function recordHistory(previous, changed) {
+    if (!history.recording || !previous || changed.size === 0) return;
 
-  function generateMelody(forceGenerated = false) {
-    const settings = app.readSettings();
-    const preset = presets[app.$('preset').value];
+    const timestamp = now();
+    const signature = Array.from(changed).sort().join(',');
+    const isContinuousDrag = changed.size === 1
+      && !changed.has('melody')
+      && signature === history.lastSignature
+      && timestamp - history.lastPushAt < HISTORY_COALESCE_MS;
 
-    if (!forceGenerated && preset?.fixed && settings.seed === preset.seed) {
-      // The flagship preset ships a hand-written theme rather than a generated one.
-      app.state.melody = Array.from({ length: steps }, (_, index) => preset.fixed[index % preset.fixed.length]);
-      app.state.motifName = ORIGINAL_MOTIF_NAME;
-      app.state.structure = ORIGINAL_STRUCTURE;
-    } else {
-      const composition = app.generator.composeMelody(settings);
-      app.state.melody = composition.notes;
-      app.state.motifName = composition.motifName;
-      app.state.structure = composition.structure;
+    if (!isContinuousDrag) {
+      history.past.push(previous);
+      if (history.past.length > HISTORY_LIMIT) history.past.shift();
+      history.future.length = 0;
     }
 
-    app.ui.renderGrid();
-    refresh();
+    history.lastPushAt = timestamp;
+    history.lastSignature = signature;
+    updateHistoryState();
   }
 
-  function applyPreset(name) {
-    const preset = presets[name];
-    if (!preset) return;
+  function applySnapshot(snapshot) {
+    history.recording = false;
+    history.lastSignature = '';
+    try {
+      app.settings.write(snapshot);
+    } finally {
+      history.recording = true;
+    }
+    updateHistoryState();
+  }
 
-    writeSettings(preset);
-    app.state.profileKey = name;
-    app.state.profileLabel = presetLabels[name] || 'Preset';
-    generateMelody();
+  function undo() {
+    const entry = history.past.pop();
+    if (!entry) return;
+    history.future.push(app.settings.read());
+    applySnapshot(entry);
+  }
+
+  function redo() {
+    const entry = history.future.pop();
+    if (!entry) return;
+    history.past.push(app.settings.read());
+    applySnapshot(entry);
+  }
+
+  /* ------------------------------------------------------------------ *
+   * Composition
+   * ------------------------------------------------------------------ */
+
+  function setPresetSelection(value) {
+    const select = app.dom.require('preset');
+    if (select.value !== value) select.value = value;
+  }
+
+  /** Full settings for a named preset, including the melody it implies. */
+  function presetSnapshot(key) {
+    const preset = presets[key];
+    const base = app.settings.read();
+    const values = {
+      ...base,
+      ...preset,
+      voiceStyle: preset.voiceStyle || base.voiceStyle,
+      profileKey: key,
+      profileLabel: presetLabels[key] || base.profileLabel
+    };
+
+    if (preset.fixed) {
+      values.melody = Array.from({ length: steps }, (_, index) => preset.fixed[index % preset.fixed.length]);
+      values.motifName = ORIGINAL_MOTIF;
+      values.structure = ORIGINAL_STRUCTURE;
+    } else {
+      const composition = app.generator.composeMelody(values);
+      values.melody = composition.notes;
+      values.motifName = composition.motifName;
+      values.structure = composition.structure;
+    }
+
+    return values;
+  }
+
+  function applyPreset(key) {
+    if (!presets[key]) return;
+    setPresetSelection(key);
+    app.settings.write(presetSnapshot(key));
+  }
+
+  /** Recomputes the melody from the current seed, scale, and density. */
+  function regenerate() {
+    const settings = app.settings.read();
+    const composition = app.generator.composeMelody(settings);
+    app.settings.write({
+      melody: composition.notes,
+      motifName: composition.motifName,
+      structure: composition.structure
+    });
   }
 
   function generateFullVariation() {
-    const previousSettings = app.readSettings();
+    const previous = app.settings.read();
     const wasPlaying = app.audioState.playing;
-    const variation = app.generator.createFullVariation(previousSettings, app.state.profileKey, app.state.progression);
+    const variation = app.generator.createFullVariation(previous, previous.profileKey, previous.progression);
+    const candidate = { ...previous, ...variation };
+    const composition = app.generator.composeMelody(candidate);
 
-    app.$('preset').value = 'random';
-    writeSettings(variation);
-    app.state.profileKey = variation.profileKey;
-    app.state.profileLabel = variation.profileLabel;
-    generateMelody(true);
+    app.settings.write({
+      ...candidate,
+      melody: composition.notes,
+      motifName: composition.motifName,
+      structure: composition.structure
+    });
+    setPresetSelection('random');
     app.ui.toast(`New character: ${variation.profileLabel}`);
 
     if (wasPlaying) app.audioEngine.restartPlayback();
   }
 
-  async function copyHandoff() {
-    const textArea = app.$('handoffText');
-    try {
-      if (!navigator.clipboard?.writeText) throw new Error('Clipboard API unavailable');
-      await navigator.clipboard.writeText(textArea.value);
-    } catch (_) {
-      // file:// pages and some permission policies block the async API; fall
-      // back to the selection-based command before asking the user to copy manually.
-      textArea.focus();
-      textArea.select();
-      if (!document.execCommand('copy')) {
-        app.ui.toast('Select the handoff text and copy it manually');
-        return;
-      }
+  /* ------------------------------------------------------------------ *
+   * Sharing and monitoring
+   * ------------------------------------------------------------------ */
+
+  function scheduleLocationSync(settings) {
+    if (!startupComplete) return;
+
+    window.clearTimeout(locationTimer);
+    locationTimer = window.setTimeout(() => {
+      locationTimer = 0;
+      app.session.syncLocation(app.settings.read());
+    }, LOCATION_SYNC_DELAY_MS);
+  }
+
+  async function copyShareLink() {
+    const settings = app.settings.read();
+    const url = app.session.buildShareUrl(settings);
+    const synced = app.session.syncLocation(settings);
+
+    const copied = await app.ui.copyText(url);
+    if (copied) {
+      app.ui.toast('Share link copied');
+      return;
     }
-    app.ui.toast('Handoff copied');
+    app.ui.toast(synced ? 'The link is in the address bar' : 'Copying a link is blocked here');
   }
 
-  function selectTab(tab) {
-    document.querySelectorAll('.tab').forEach((item) => {
-      const selected = item === tab;
-      item.classList.toggle('active', selected);
-      item.setAttribute('aria-selected', String(selected));
-    });
-    app.state.currentTab = tab.dataset.tab;
-    app.ui.updateOutputs();
+  function toggleMute() {
+    muted = app.audioEngine.setMuted(!muted);
+    app.ui.toast(muted ? 'Muted' : 'Sound on');
   }
 
-  function toggleHandoff() {
-    const toggle = app.$('handoffToggle');
-    const collapsed = toggle.closest('.handoff').classList.toggle('collapsed');
-    toggle.setAttribute('aria-expanded', String(!collapsed));
-    toggle.textContent = collapsed ? 'Expand' : 'Collapse';
+  /* ------------------------------------------------------------------ *
+   * Wiring
+   * ------------------------------------------------------------------ */
+
+  function onSettingsChanged({ settings, previous, changed }) {
+    app.ui.syncGrid(settings, previous);
+    app.ui.requestOutputs(settings);
+    app.audioEngine.updateGraph(settings);
+    app.session.scheduleSave(settings);
+    scheduleLocationSync(settings);
+    recordHistory(previous, changed);
   }
 
-  function onKeyDown(event) {
-    if (event.code !== 'Space' || event.repeat || event.altKey || event.ctrlKey || event.metaKey) return;
+  function bindControls() {
+    for (const id of app.numericIds) {
+      const control = app.dom.require(id);
+      const publish = () => app.settings.sync();
+      control.addEventListener('input', publish);
+      control.addEventListener('change', publish);
+    }
 
-    const target = document.activeElement;
-    const tag = target?.tagName || '';
-    if (['INPUT', 'TEXTAREA', 'SELECT', 'BUTTON'].includes(tag) || target?.isContentEditable) return;
+    const pad = app.dom.require('pad');
+    const drums = app.dom.require('drums');
+    pad.addEventListener('change', () => app.settings.sync());
+    drums.addEventListener('change', () => app.settings.sync());
 
-    event.preventDefault();
-    app.audioEngine.togglePlayback();
-  }
+    // Composition inputs regenerate on commit; everything else is an
+    // arrangement parameter that is applied live.
+    app.dom.require('density').addEventListener('change', regenerate);
+    app.dom.require('scale').addEventListener('change', regenerate);
+    app.dom.require('seed').addEventListener('change', regenerate);
 
-  function bindEvents() {
-    app.$('preset').addEventListener('change', (event) => {
+    app.dom.require('preset').addEventListener('change', (event) => {
       if (event.target.value === 'random') generateFullVariation();
       else applyPreset(event.target.value);
     });
-    app.$('newSeed').addEventListener('click', generateFullVariation);
-    app.$('generate').addEventListener('click', generateFullVariation);
-    app.$('seed').addEventListener('change', () => generateMelody(true));
+  }
 
-    // Scale and density feed the composition itself, so they regenerate on
-    // commit; everything else is an arrangement parameter applied live.
-    for (const id of app.controlIds) {
-      if (id !== 'scale') app.$(id).addEventListener('input', refresh);
-    }
-    app.$('scale').addEventListener('change', () => generateMelody(true));
-    app.$('density').addEventListener('change', () => generateMelody(true));
+  function bindTransport() {
+    app.dom.require('play').addEventListener('click', () => app.audioEngine.togglePlayback());
+    app.dom.require('generate').addEventListener('click', generateFullVariation);
+    app.dom.require('newSeed').addEventListener('click', generateFullVariation);
+    app.dom.require('exportWav').addEventListener('click', () => app.exporter.exportWav());
+    app.dom.require('downloadSpec').addEventListener('click', () => app.exporter.downloadSpec());
+    app.dom.require('copyLink').addEventListener('click', copyShareLink);
+    app.dom.require('undoStep').addEventListener('click', undo);
+    app.dom.require('redoStep').addEventListener('click', redo);
 
-    app.$('stepGrid').addEventListener('click', app.ui.onGridClick);
-    app.$('play').addEventListener('click', app.audioEngine.togglePlayback);
-    app.$('exportWav').addEventListener('click', app.exporter.exportWav);
-    document.querySelectorAll('[data-sfx]').forEach((button) => {
+    for (const button of document.querySelectorAll('[data-sfx]')) {
       button.addEventListener('click', () => app.audioEngine.playSfx(button.dataset.sfx));
-    });
-
-    document.querySelectorAll('.tab').forEach((tab) => tab.addEventListener('click', () => selectTab(tab)));
-    app.$('copyHandoff').addEventListener('click', copyHandoff);
-    app.$('downloadSpec').addEventListener('click', app.exporter.downloadSpec);
-    app.$('handoffToggle').addEventListener('click', toggleHandoff);
-
-    window.addEventListener('keydown', onKeyDown);
-    window.addEventListener('pagehide', () => app.audioEngine.dispose());
-  }
-
-  function initialize() {
-    bindEvents();
-    applyPreset('original');
-    app.ui.drawScope();
-
-    if (!(window.AudioContext || window.webkitAudioContext)) {
-      app.$('play').disabled = true;
-      app.$('audioStatus').textContent = 'Web Audio unsupported';
-      app.$('audioStatus').closest('.status').classList.add('is-error');
     }
   }
 
-  initialize();
+  function onKeyDown(event) {
+    const target = event.target;
+    const tag = (target && target.tagName) || '';
+    const inField = tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || Boolean(target && target.isContentEditable);
+    const modifier = event.ctrlKey || event.metaKey;
+
+    if (modifier && !event.altKey) {
+      const key = event.key.toLowerCase();
+      if (key === 'z') {
+        // Leave undo inside text fields to the browser.
+        if (inField) return;
+        event.preventDefault();
+        if (event.shiftKey) redo();
+        else undo();
+        return;
+      }
+      if (key === 'y' && !inField) {
+        event.preventDefault();
+        redo();
+      }
+      return;
+    }
+
+    if (event.altKey || event.repeat) return;
+
+    if (event.code === 'Space') {
+      if (inField || tag === 'BUTTON' || tag === 'A') return;
+      event.preventDefault();
+      app.audioEngine.togglePlayback();
+      return;
+    }
+
+    if ((event.key === 'm' || event.key === 'M') && !inField) toggleMute();
+  }
+
+  function bindGlobalEvents() {
+    window.addEventListener('keydown', onKeyDown);
+    window.addEventListener('pagehide', () => {
+      app.session.flush();
+      app.audioEngine.dispose();
+    });
+  }
+
+  /* ------------------------------------------------------------------ *
+   * Startup
+   * ------------------------------------------------------------------ */
+
+  function resolveInitialSettings() {
+    const shared = app.session.readShareFromLocation();
+    if (shared) {
+      setPresetSelection('random');
+      return { values: shared, source: 'link' };
+    }
+
+    const stored = app.session.restore();
+    if (stored) {
+      setPresetSelection('random');
+      return { values: stored, source: 'session' };
+    }
+
+    setPresetSelection('original');
+    return { values: presetSnapshot('original'), source: 'preset' };
+  }
+
+  function reportUnsupportedAudio() {
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+    if (AudioContextClass) return;
+
+    app.dom.require('play').disabled = true;
+    app.ui.setStatus('Web Audio unsupported', true);
+  }
+
+  function start() {
+    app.ui.init();
+    bindControls();
+    bindTransport();
+    bindGlobalEvents();
+    app.settings.subscribe(onSettingsChanged);
+
+    const initial = resolveInitialSettings();
+    app.settings.write(initial.values);
+
+    history.recording = true;
+    startupComplete = true;
+    updateHistoryState();
+
+    const settings = app.settings.read();
+    app.ui.renderOutputs(settings);
+    app.audioEngine.updateGraph(settings);
+    reportUnsupportedAudio();
+
+    if (initial.source === 'session') app.ui.toast('Restored your last session');
+  }
+
+  start();
 })();
